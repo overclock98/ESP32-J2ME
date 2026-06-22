@@ -1,0 +1,46 @@
+
+#ifndef __FLINT_CONF_H
+#define __FLINT_CONF_H
+
+#include "sdkconfig.h"
+#include <sys/socket.h> /* Workaround for IPV6_UNICAST_HOPS */
+#include "flint_common.h"
+
+#define KILO_BYTE(_value)           ((_value) * 1024)
+#define MEGA_BYTE(_value)           ((_value) * KILO_BYTE(1024))
+
+#if CONFIG_IDF_TARGET_ESP32
+    #define FLINT_VARIANT_NAME      "ESP32 FlintJVM"
+#elif CONFIG_IDF_TARGET_ESP32C2
+    #error "Not supported for ESP32C2"
+#elif CONFIG_IDF_TARGET_ESP32C3
+    #define FLINT_VARIANT_NAME      "ESP32C3 FlintJVM"
+#elif CONFIG_IDF_TARGET_ESP32C6
+    #define FLINT_VARIANT_NAME      "ESP32C6 FlintJVM"
+#elif CONFIG_IDF_TARGET_ESP32C5
+    #error "Not supported for ESP32C5"
+#elif CONFIG_IDF_TARGET_ESP32H2
+    #error "Not supported for ESP32H2"
+#elif CONFIG_IDF_TARGET_ESP32P4
+    #error "Not supported for ESP32P4"
+#elif CONFIG_IDF_TARGET_ESP32S2
+    #define FLINT_VARIANT_NAME      "ESP32S2 FlintJVM"
+#elif CONFIG_IDF_TARGET_ESP32S3
+    #define FLINT_VARIANT_NAME      "ESP32S3 FlintJVM"
+#else
+    #error "Unknown ESP32 target"
+#endif
+
+#define FILE_NAME_BUFF_SIZE         128
+
+#define DEFAULT_STACK_SIZE          KILO_BYTE(64)
+#define OBJECT_COUNT_TO_GC          10000
+
+#define MAX_OF_BREAK_POINT          20
+#define DBG_TX_BUFFER_SIZE          512
+#define DBG_CONSOLE_BUFFER_SIZE     KILO_BYTE(1)
+
+#define FLINT_API_NET_ENABLED       1
+#define FLINT_API_DRAW_ENABLED      1
+
+#endif /* __FLINT_CONF_H */

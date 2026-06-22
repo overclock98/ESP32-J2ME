@@ -1,0 +1,6 @@
+## IDF Component Manager Manifest File
+dependencies:
+  espressif/esp_tinyusb: "^1.4.5"
+  espressif/esp_lcd_axs15231b: "~2.1.0"
+  espressif/esp_lcd_touch: "~1.2.1"
+  idf: "^5.3"
