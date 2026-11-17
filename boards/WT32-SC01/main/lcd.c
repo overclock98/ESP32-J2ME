@@ -24,7 +24,7 @@
 
 static esp_lcd_panel_handle_t    s_panel      = NULL;
 static esp_lcd_panel_io_handle_t s_io         = NULL;
-static uint16_t                 *s_bounce     = NULL;   /* DMA-capable internal SRAM */
+static uint16_t                 *s_bounce[2]  = {NULL, NULL}; /* Ping-Pong DMA buffers in internal SRAM */
 static SemaphoreHandle_t         s_flush_done = NULL;
 static bool                      s_inited     = false;
 
@@ -98,8 +98,9 @@ void lcd_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel, true));
 
     const size_t bounce_bytes = LCD_W * BOUNCE_LINES * sizeof(uint16_t);
-    s_bounce = heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    assert(s_bounce);
+    s_bounce[0] = heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    s_bounce[1] = heap_caps_malloc(bounce_bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    assert(s_bounce[0] && s_bounce[1]);
 
     /* Keypad pixel buffer in PSRAM */
     s_keypad = heap_caps_malloc((size_t)LCD_W * KEYPAD_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
@@ -111,15 +112,15 @@ void lcd_init(void)
     s_inited = true;
 }
 
-int lcd_width(void)  { return LCD_W; }
-int lcd_height(void) { return GAME_H; }   /* the game owns only the top region */
+int lcd_width(void)  { return GAME_W; }   /* native 240 width for Nokia S40v5 */
+int lcd_height(void) { return GAME_H; }   /* 320 — what the game sees */
 
 /* ── On-screen touch keypad ───────────────────────────────────────────────
  * Numpad (3 cols x 4 rows, phone order) drawn into s_keypad (bottom strip).
- * Two Nokia-style soft keys (CALL/END) are a half-width vertical stack (s_softkey)
- * overlaid on the game's bottom-right.
- *      1 2 3                          [CALL]  idx 12 -> -6 (left soft / OK)
- *      4 5 6                          [END ]  idx 13 -> -7 (right soft / Back)
+ * Two Nokia-style soft keys (OK/BK) are placed in the 40px right margin (s_softkey)
+ * completely OUTSIDE the 240x320 centered game area.
+ *      1 2 3                          [OK]  idx 12 -> -6 (left soft / OK)
+ *      4 5 6                          [BK]  idx 13 -> -7 (right soft / Back)
  *      7 8 9
  *      * 0 #     ('*','#' are real key codes 42/35)
  */
@@ -129,11 +130,11 @@ static const char KP_KEYS[12] = { '1','2','3', '4','5','6', '7','8','9', '*','0'
 #define KP_BOTTOM_Y    (3 * KP_DIGIT_ROW_H)      /* 126 */
 #define KP_BOTTOM_H    (KEYPAD_H - KP_BOTTOM_Y)  /* 34 — normal-height * 0 # row */
 
-#define SK_W      56                             /* ~half a numpad key wide */
-#define SK_H      30
-#define SK_TOTAL  (2 * SK_H)                     /* two stacked buttons */
-#define SK_X0     (LCD_W - SK_W)                 /* right edge */
-#define SK_Y0     (GAME_H - SK_TOTAL)            /* just above the keypad strip */
+#define SK_W      MARGIN_W                       /* 40 — exactly fills right margin */
+#define SK_H      40                             /* square softkey buttons */
+#define SK_TOTAL  (2 * SK_H)                     /* 80 */
+#define SK_X0     (GAME_X0 + GAME_W)             /* 280 — right margin start */
+#define SK_Y0     (GAME_H - SK_TOTAL)            /* 240 — bottom of right margin */
 
 /* Minimal 5x7 glyphs (row-major, MSB = leftmost column). */
 static const uint8_t *glyph5x7(char c) {
@@ -204,17 +205,31 @@ static void lcd_keypad_draw(void) {
 static void lcd_softkey_draw(void) {
     if (!s_softkey) return;
     const uint16_t white = kp_rgb(255,255,255);
-    for (int b = 0; b < 2; b++) {                  /* b=0 CALL (green), b=1 END (red) */
-        int y0 = b * SK_H, on = (s_kp_active == 12 + b), m = 2, sc = 2;
+    const uint16_t bezel = kp_rgb(16, 16, 24);
+    const uint16_t border_col = kp_rgb(50, 50, 70);
+
+    /* Fill upper right margin (y=0..SK_Y0) with dark bezel */
+    blit_fill(s_softkey, MARGIN_W, GAME_H, 0, 0, MARGIN_W, SK_Y0, bezel);
+    /* 1px left separator border against game viewport */
+    for (int r = 0; r < GAME_H; r++) {
+        blit_px(s_softkey, MARGIN_W, GAME_H, 0, r, border_col);
+    }
+
+    /* Two softkeys stacked at the bottom of the right margin */
+    for (int b = 0; b < 2; b++) {                  /* b=0 OK (green), b=1 BK (red) */
+        int y0 = SK_Y0 + b * SK_H;
+        bool on = (s_kp_active == 12 + b);
+        int m = 2, sc = 2;
         uint16_t face = (b == 0) ? kp_rgb(0, on?235:150, 40)
                                  : kp_rgb(on?255:190, 35, 35);
-        blit_fill(s_softkey, SK_W, SK_TOTAL, m, y0+m, SK_W-2*m, SK_H-2*m, face);
-        blit_border(s_softkey, SK_W, SK_TOTAL, m, y0+m, SK_W-2*m, SK_H-2*m, white);
+        blit_fill(s_softkey, MARGIN_W, GAME_H, m + 1, y0 + m, MARGIN_W - 2 * m - 1, SK_H - 2 * m, face);
+        blit_border(s_softkey, MARGIN_W, GAME_H, m + 1, y0 + m, MARGIN_W - 2 * m - 1, SK_H - 2 * m, white);
         const char *lbl = (b == 0) ? "OK" : "BK";
         int cw = 5*sc, gap = sc, tw = 2*cw + gap, gh = 7*sc;
-        int gx = (SK_W - tw)/2, gy = y0 + (SK_H - gh)/2;
-        blit_glyph(s_softkey, SK_W, SK_TOTAL, lbl[0], gx, gy, sc, white);
-        blit_glyph(s_softkey, SK_W, SK_TOTAL, lbl[1], gx+cw+gap, gy, sc, white);
+        int gx = 1 + (MARGIN_W - 1 - tw)/2;
+        int gy = y0 + (SK_H - gh)/2;
+        blit_glyph(s_softkey, MARGIN_W, GAME_H, lbl[0], gx, gy, sc, white);
+        blit_glyph(s_softkey, MARGIN_W, GAME_H, lbl[1], gx+cw+gap, gy, sc, white);
     }
 }
 
@@ -222,17 +237,30 @@ static volatile bool s_kp_dirty = true;
 
 void lcd_keypad_init(void) {
     if (!s_softkey) {
-        s_softkey = heap_caps_malloc((size_t)SK_W * SK_TOTAL * 2, MALLOC_CAP_SPIRAM);
-        if (s_softkey) memset(s_softkey, 0, (size_t)SK_W * SK_TOTAL * 2);
+        s_softkey = heap_caps_malloc((size_t)MARGIN_W * GAME_H * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
+        if (s_softkey) memset(s_softkey, 0, (size_t)MARGIN_W * GAME_H * sizeof(uint16_t));
     }
     lcd_keypad_draw();
     lcd_softkey_draw();
+
+    /* Clear and border left margin once (x=0..GAME_X0, y=0..GAME_H) */
+    for (int y = 0; y < GAME_H; y += BOUNCE_LINES) {
+        int y_end = y + BOUNCE_LINES;
+        if (y_end > GAME_H) y_end = GAME_H;
+        int bh = y_end - y;
+        blit_fill((uint8_t *)s_bounce[0], MARGIN_W, bh, 0, 0, MARGIN_W, bh, kp_rgb(16, 16, 24));
+        for (int r = 0; r < bh; r++)
+            blit_px((uint8_t *)s_bounce[0], MARGIN_W, bh, MARGIN_W - 1, r, kp_rgb(50, 50, 70));
+        esp_lcd_panel_draw_bitmap(s_panel, 0, y, GAME_X0, y_end, s_bounce[0]);
+        xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300));
+    }
+
     s_kp_dirty = true;
 }
 
 int lcd_keypad_hit(int x, int y) {
-    /* soft-key overlay (in the game area, bottom-right corner) */
-    if (x >= SK_X0 && x < LCD_W && y >= SK_Y0 && y < GAME_H) {
+    /* soft-key in right margin (outside 240x320 game screen) */
+    if (x >= (SK_X0 - 10) && y >= SK_Y0 && y < GAME_H) {
         int bsel = (y - SK_Y0) / SK_H; if (bsel < 0) bsel = 0; if (bsel > 1) bsel = 1;
         return 12 + bsel;
     }
@@ -259,49 +287,70 @@ void lcd_keypad_set_active(int idx) {
     s_kp_dirty = true;
 }
 
-/* Push game frame (top GAME_H rows) to the panel via internal-SRAM bounce buffer.
- * Keypad rows (GAME_H..LCD_H) are static and only pushed when s_kp_dirty is set.
+/* Push game frame (240x320 centered at x=40) using Ping-Pong DMA.
+ * Keypad rows and softkey margin are pushed ONLY when s_kp_dirty is set.
  * Everything runs strictly on the render thread to guarantee zero DMA/SPI race conditions. */
 void lcd_present(const uint8_t *fb, uint32_t len)
 {
     if (!s_inited || fb == NULL) return;
-    const size_t game_need = (size_t)LCD_W * GAME_H * sizeof(uint16_t);
+    const size_t game_need = (size_t)GAME_W * GAME_H * sizeof(uint16_t);
     if (len < game_need) return;
 
-    /* 1. Push game viewport (rows 0..GAME_H) */
-    for (int y = 0; y < GAME_H; y += BOUNCE_LINES) {
+    /* 1. Push game viewport (240x320 at x=GAME_X0..GAME_X0+GAME_W) using Ping-Pong DMA */
+    const size_t strip_bytes = (size_t)GAME_W * BOUNCE_LINES * sizeof(uint16_t);
+    int cur = 0;
+
+    /* Prime: Copy Strip 0 into s_bounce[0] and start DMA */
+    memcpy(s_bounce[0], fb, strip_bytes);
+    esp_lcd_panel_draw_bitmap(s_panel, GAME_X0, 0, GAME_X0 + GAME_W, BOUNCE_LINES, s_bounce[0]);
+
+    /* For strips 1..7: memcpy next strip while previous DMA is in flight */
+    for (int y = BOUNCE_LINES; y < GAME_H; y += BOUNCE_LINES) {
+        int next = 1 - cur;
         int y_end = y + BOUNCE_LINES;
         if (y_end > GAME_H) y_end = GAME_H;
-        const size_t pixels = (size_t)LCD_W * (y_end - y);
+        size_t bytes = (size_t)GAME_W * (y_end - y) * sizeof(uint16_t);
 
-        memcpy(s_bounce, fb + (size_t)y * LCD_W * 2, pixels * 2);
-        /* overlay soft-keys in bottom-right corner */
-        if (s_softkey && y_end > SK_Y0) {
-            int o0 = (y > SK_Y0) ? y : SK_Y0;
-            for (int row = o0; row < y_end; row++) {
-                uint8_t *dst = (uint8_t *)s_bounce + (size_t)(row - y) * LCD_W * 2 + (size_t)SK_X0 * 2;
-                const uint8_t *src = s_softkey + (size_t)(row - SK_Y0) * SK_W * 2;
-                memcpy(dst, src, (size_t)SK_W * 2);
-            }
-        }
+        /* Concurrently copy next strip into s_bounce[next] */
+        memcpy(s_bounce[next], fb + (size_t)y * GAME_W * sizeof(uint16_t), bytes);
 
-        esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end, s_bounce);
+        /* Wait for previous strip to finish DMA */
         if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300)) != pdTRUE)
-            esp_rom_printf("[lcd present timeout y=%d]\n", y);
+            esp_rom_printf("[lcd present timeout y=%d]\n", y - BOUNCE_LINES);
+
+        /* Launch DMA for the buffer we just copied */
+        esp_lcd_panel_draw_bitmap(s_panel, GAME_X0, y, GAME_X0 + GAME_W, y_end, s_bounce[next]);
+        cur = next;
     }
 
-    /* 2. Push keypad (rows GAME_H..LCD_H) ONLY when dirty (init or touch press/release) */
-    if (s_kp_dirty && s_keypad) {
-        s_kp_dirty = false;
-        for (int y = GAME_H; y < LCD_H; y += BOUNCE_LINES) {
-            int y_end = y + BOUNCE_LINES;
-            if (y_end > LCD_H) y_end = LCD_H;
-            const size_t pixels = (size_t)LCD_W * (y_end - y);
+    /* Wait for the final strip to complete */
+    if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300)) != pdTRUE)
+        esp_rom_printf("[lcd present final timeout]\n");
 
-            memcpy(s_bounce, s_keypad + (size_t)(y - GAME_H) * LCD_W * 2, pixels * 2);
-            esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end, s_bounce);
-            if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300)) != pdTRUE)
-                esp_rom_printf("[lcd kp timeout y=%d]\n", y);
+    /* 2. Push side margins & keypad ONLY when dirty (init or touch press/release) */
+    if (s_kp_dirty) {
+        s_kp_dirty = false;
+        /* Flush softkey sidebar (right margin x=SK_X0..LCD_W, y=0..GAME_H) */
+        if (s_softkey) {
+            for (int y = 0; y < GAME_H; y += BOUNCE_LINES) {
+                int y_end = y + BOUNCE_LINES;
+                if (y_end > GAME_H) y_end = GAME_H;
+                size_t bytes = (size_t)MARGIN_W * (y_end - y) * sizeof(uint16_t);
+                memcpy(s_bounce[0], s_softkey + (size_t)y * MARGIN_W * sizeof(uint16_t), bytes);
+                esp_lcd_panel_draw_bitmap(s_panel, SK_X0, y, LCD_W, y_end, s_bounce[0]);
+                xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300));
+            }
+        }
+        /* Flush bottom keypad (x=0..LCD_W, y=GAME_H..LCD_H) */
+        if (s_keypad) {
+            for (int y = GAME_H; y < LCD_H; y += BOUNCE_LINES) {
+                int y_end = y + BOUNCE_LINES;
+                if (y_end > LCD_H) y_end = LCD_H;
+                size_t bytes = (size_t)LCD_W * (y_end - y) * sizeof(uint16_t);
+                memcpy(s_bounce[0], s_keypad + (size_t)(y - GAME_H) * LCD_W * sizeof(uint16_t), bytes);
+                esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end, s_bounce[0]);
+                xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300));
+            }
         }
     }
 }
