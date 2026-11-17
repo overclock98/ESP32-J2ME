@@ -7,7 +7,12 @@
 #include "../heap_private.h"
 #include "flint_system_api.h"
 #include "freertos/FreeRTOS.h"
+#include "soc/soc_caps.h"
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "driver/usb_serial_jtag.h"
+#else
+#include "driver/uart.h"
+#endif
 #include "esp_rom_sys.h"
 #include <string.h>
 
@@ -24,11 +29,15 @@ void FlintAPI::System::free(void *p) {
 }
 
 void FlintAPI::System::consoleWrite(uint8_t *utf8, uint32_t length) {
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
     /* NON-BLOCKING write to USB-Serial-JTAG (timeout 0). The blocking version (50ms timeout)
      * stalled the game thread on every log line once the host couldn't drain the TX buffer
      * fast enough under render load — which LOOKED like a freeze. Dropping output when the
      * buffer is full keeps the game running at full speed. */
     usb_serial_jtag_write_bytes((const char *)utf8, length, 0);
+#else
+    uart_write_bytes(UART_NUM_0, (const char *)utf8, length);
+#endif
 }
 
 /* SPSC ring buffer for typed console input (producer: debugger RX task; consumer: the VM
