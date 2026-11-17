@@ -1,7 +1,7 @@
-# Diamond Rush on ESP32-S3 (J2ME → Flint JVM)
+# Diamond Rush on ESP32 & ESP32-S3 (J2ME → Flint JVM)
 
-Run the classic **Gameloft *Diamond Rush*** (a J2ME / MIDP-2.0 MIDlet) on a bare
-**ESP32-S3** by running the actual Java bytecode on the [Flint JVM](https://github.com/FlintVN/FlintESPJVM),
+Run the classic **Gameloft *Diamond Rush*** (a J2ME / MIDP-2.0 MIDlet) on bare
+**ESP32-S3** and **ESP32** by running the actual Java bytecode on the [Flint JVM](https://github.com/FlintVN/FlintESPJVM),
 with a from-scratch **MIDP/CLDC compatibility layer**, native **PNG decoding**, and an
 **on-screen touch keypad** — no recompilation of the game, no emulator on a PC.
 
@@ -11,12 +11,22 @@ with a from-scratch **MIDP/CLDC compatibility layer**, native **PNG decoding**, 
 
 ---
 
-## Hardware
+## Supported Hardware
 
-- **Board:** Guition **JC3248W535EN** — ESP32-S3-WROOM-1 **N16R8** (16 MB flash / 8 MB PSRAM)
+### 1. Guition JC3248W535EN
+- **MCU:** ESP32-S3-WROOM-1 **N16R8** (16 MB flash / 8 MB PSRAM)
 - **Display:** AXS15231B, **QSPI**, 320×480, RGB565
 - **Touch:** I²C capacitive (same AXS15231B controller)
-- Audio / SD present on the board (audio is best-effort / WIP)
+- **Audio / SD:** Present on board (audio WIP)
+- **Build target:** `boards/ESP32-S3N16RX/` (via `./build.sh`)
+
+### 2. Wireless-Tag WT32-SC01 (V3.4)
+- **MCU:** ESP32-WROVER-B (Xtensa dual-core LX6, 16 MB flash DIO / 8 MB PSRAM)
+- **Display:** ST7796, **4-line HSPI**, 320×480, RGB565
+- **Touch:** FocalTech FT6336U I²C capacitive touch (`SDA=18`, `SCL=19`, `INT=39`)
+- **Keypad:** Composited 320×160 native on-screen virtual keypad (numpad + softkeys)
+- **Build target:** `boards/WT32-SC01/` (via `./build_wt32sc01.sh`)
+- See [`README.WT32-SC01.md`](README.WT32-SC01.md) for full pinout, flash offsets, and hardware notes.
 
 ## What this is
 
@@ -70,6 +80,7 @@ classes and `getResourceAsStream`s the PNG/MIDI assets from `/res`.
 
 ## Build
 
+### For Guition JC3248W535EN (ESP32-S3):
 ```bash
 # 1) put your jar in place
 cp /path/to/DiamondRush_s40v5.jar game/DiamondRush_s40v5.jar
@@ -77,27 +88,36 @@ cp /path/to/DiamondRush_s40v5.jar game/DiamondRush_s40v5.jar
 # 2) point at your ESP-IDF (or export it yourself first), then build
 ESP_IDF=$HOME/esp/v5.5.2/esp-idf ./build.sh
 ```
+Output image: `boards/build/ESP32-S3N16RX_FlintJVM_Release.bin`
 
-`build.sh` compiles `java.base` (FlintJDK) → `midp.jar` → `FlintApp.jar`, runs `idf.py build`,
-packs the `storage` partition, and merges everything into one image:
-
+### For Wireless-Tag WT32-SC01 (ESP32):
+```bash
+./build_wt32sc01.sh
 ```
-boards/build/ESP32-S3N16RX_FlintJVM_Release.bin
-```
+Output image: `boards/build/WT32-SC01_FlintJVM_Release.bin`
 
 ## Flash
 
 Close any serial monitor first (only one program may own the port).
 
+### ESP32-S3 (Guition):
 ```bash
 python3 -m esptool --chip esp32s3 -p /dev/ttyACM0 write_flash -z 0x0 \
   boards/build/ESP32-S3N16RX_FlintJVM_Release.bin
 ```
-
-Then open the console (USB-Serial-JTAG):
-
+Console monitor (USB-Serial-JTAG):
 ```bash
-idf.py -C boards/ESP32-S3N16RX -p /dev/ttyACM0 monitor      # or: cat /dev/ttyACM0
+idf.py -C boards/ESP32-S3N16RX -p /dev/ttyACM0 monitor
+```
+
+### ESP32 (WT32-SC01):
+```bash
+python -m esptool --chip esp32 -p COM10 -b 921600 write_flash -z 0x0 \
+  boards/build/WT32-SC01_FlintJVM_Release.bin
+```
+Console monitor (UART0 @ 460800 baud):
+```bash
+python -m serial.tools.miniterm COM10 460800
 ```
 
 You should see `Diamond Rush: boot` → `creating MIDlet GloftDIRU` → asset loads → the game
