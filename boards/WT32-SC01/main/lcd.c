@@ -73,7 +73,7 @@ void lcd_init(void)
     const esp_lcd_panel_io_spi_config_t io_cfg = {
         .dc_gpio_num = PIN_LCD_DC,
         .cs_gpio_num = PIN_LCD_CS,
-        .pclk_hz = 40 * 1000 * 1000,
+        .pclk_hz = 80 * 1000 * 1000,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
@@ -218,6 +218,8 @@ static void lcd_softkey_draw(void) {
     }
 }
 
+static volatile bool s_kp_dirty = true;
+
 void lcd_keypad_init(void) {
     if (!s_softkey) {
         s_softkey = heap_caps_malloc((size_t)SK_W * SK_TOTAL * 2, MALLOC_CAP_SPIRAM);
@@ -225,6 +227,7 @@ void lcd_keypad_init(void) {
     }
     lcd_keypad_draw();
     lcd_softkey_draw();
+    s_kp_dirty = true;
 }
 
 int lcd_keypad_hit(int x, int y) {
@@ -253,45 +256,52 @@ void lcd_keypad_set_active(int idx) {
     s_kp_active = idx;
     lcd_keypad_draw();
     lcd_softkey_draw();
+    s_kp_dirty = true;
 }
 
-/* Push full big-endian RGB565 frame to the panel via internal-SRAM bounce buffer. */
+/* Push game frame (top GAME_H rows) to the panel via internal-SRAM bounce buffer.
+ * Keypad rows (GAME_H..LCD_H) are static and only pushed when s_kp_dirty is set.
+ * Everything runs strictly on the render thread to guarantee zero DMA/SPI race conditions. */
 void lcd_present(const uint8_t *fb, uint32_t len)
 {
     if (!s_inited || fb == NULL) return;
     const size_t game_need = (size_t)LCD_W * GAME_H * sizeof(uint16_t);
     if (len < game_need) return;
 
-    for (int y = 0; y < LCD_H; y += BOUNCE_LINES) {
+    /* 1. Push game viewport (rows 0..GAME_H) */
+    for (int y = 0; y < GAME_H; y += BOUNCE_LINES) {
         int y_end = y + BOUNCE_LINES;
-        if (y_end > LCD_H) y_end = LCD_H;
+        if (y_end > GAME_H) y_end = GAME_H;
         const size_t pixels = (size_t)LCD_W * (y_end - y);
 
-        if (y_end <= GAME_H) {                       /* pure game strip */
-            memcpy(s_bounce, fb + (size_t)y * LCD_W * 2, pixels * 2);
-            /* overlay soft-keys in bottom-right corner */
-            if (s_softkey && y < GAME_H && y_end > SK_Y0) {
-                int o0 = (y > SK_Y0) ? y : SK_Y0;
-                for (int row = o0; row < y_end; row++) {
-                    uint8_t *dst = (uint8_t *)s_bounce + (size_t)(row - y) * LCD_W * 2 + (size_t)SK_X0 * 2;
-                    const uint8_t *src = s_softkey + (size_t)(row - SK_Y0) * SK_W * 2;
-                    memcpy(dst, src, (size_t)SK_W * 2);
-                }
-            }
-        } else if (y >= GAME_H) {                    /* pure keypad strip */
-            if (s_keypad) memcpy(s_bounce, s_keypad + (size_t)(y - GAME_H) * LCD_W * 2, pixels * 2);
-            else          memset(s_bounce, 0, pixels * 2);
-        } else {                                     /* boundary strip */
-            for (int row = y; row < y_end; row++) {
-                uint8_t *dst = (uint8_t *)s_bounce + (size_t)(row - y) * LCD_W * 2;
-                if (row < GAME_H)  memcpy(dst, fb + (size_t)row * LCD_W * 2, LCD_W * 2);
-                else if (s_keypad) memcpy(dst, s_keypad + (size_t)(row - GAME_H) * LCD_W * 2, LCD_W * 2);
-                else               memset(dst, 0, LCD_W * 2);
+        memcpy(s_bounce, fb + (size_t)y * LCD_W * 2, pixels * 2);
+        /* overlay soft-keys in bottom-right corner */
+        if (s_softkey && y_end > SK_Y0) {
+            int o0 = (y > SK_Y0) ? y : SK_Y0;
+            for (int row = o0; row < y_end; row++) {
+                uint8_t *dst = (uint8_t *)s_bounce + (size_t)(row - y) * LCD_W * 2 + (size_t)SK_X0 * 2;
+                const uint8_t *src = s_softkey + (size_t)(row - SK_Y0) * SK_W * 2;
+                memcpy(dst, src, (size_t)SK_W * 2);
             }
         }
 
         esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end, s_bounce);
         if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300)) != pdTRUE)
             esp_rom_printf("[lcd present timeout y=%d]\n", y);
+    }
+
+    /* 2. Push keypad (rows GAME_H..LCD_H) ONLY when dirty (init or touch press/release) */
+    if (s_kp_dirty && s_keypad) {
+        s_kp_dirty = false;
+        for (int y = GAME_H; y < LCD_H; y += BOUNCE_LINES) {
+            int y_end = y + BOUNCE_LINES;
+            if (y_end > LCD_H) y_end = LCD_H;
+            const size_t pixels = (size_t)LCD_W * (y_end - y);
+
+            memcpy(s_bounce, s_keypad + (size_t)(y - GAME_H) * LCD_W * 2, pixels * 2);
+            esp_lcd_panel_draw_bitmap(s_panel, 0, y, LCD_W, y_end, s_bounce);
+            if (xSemaphoreTake(s_flush_done, pdMS_TO_TICKS(300)) != pdTRUE)
+                esp_rom_printf("[lcd kp timeout y=%d]\n", y);
+        }
     }
 }
