@@ -85,8 +85,7 @@ void lcd_init(void)
 
     const esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = PIN_LCD_RST,
-        /* BGR: flint.drawing.ColorRgb565 packs pixels as BGR565 */
-        .rgb_endian     = LCD_RGB_ENDIAN_BGR,
+        .rgb_endian     = LCD_RGB_ENDIAN_RGB,
         .bits_per_pixel = LCD_BIT_PER_PIXEL,
         .vendor_config  = NULL,
     };
